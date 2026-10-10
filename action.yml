@@ -1,0 +1,47 @@
+name: Vulnera Static Security Runner
+description: Runs the Vulnera static security scanners and uploads normalized results.
+inputs:
+  api-url: { description: Vulnera API base URL, required: true }
+  repository-id: { description: Registered Vulnera repository UUID, required: true }
+  scan-id: { description: Scan UUID, required: true }
+  commit-sha: { description: Immutable commit SHA, required: true }
+  ref: { description: Git ref, required: true }
+  scanners: { description: Comma separated scanner names, required: false, default: secrets,sca,sast,iac }
+  allow-ingestion: { description: Allow privileged result upload, required: false, default: 'false' }
+  upload-artifacts: { description: Upload non-secret scanner reports to private artifact storage, required: false, default: 'true' }
+runs:
+  using: composite
+  steps:
+    - name: Install pinned scanner toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${RUNNER_OS}" != "Linux" ] || [ "${RUNNER_ARCH}" != "X64" ]; then
+          echo "Vulnera runner currently supports Linux x64 only (got ${RUNNER_OS}/${RUNNER_ARCH})." >&2
+          exit 1
+        fi
+        install_dir="${RUNNER_TEMP}/vulnera-tools"
+        mkdir -p "${install_dir}"
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          curl --fail --location --silent --show-error "https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz" | tar -xz -C "${install_dir}" gitleaks
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+        fi
+        if ! command -v osv-scanner >/dev/null 2>&1; then
+          curl --fail --location --silent --show-error "https://github.com/google/osv-scanner/releases/download/v2.0.2/osv-scanner_linux_amd64" -o "${install_dir}/osv-scanner"
+          chmod 0755 "${install_dir}/osv-scanner"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+        fi
+        python3 -m pip install --disable-pip-version-check --quiet "semgrep==1.91.0" "checkov==3.2.293"
+    - shell: bash
+      env:
+        VULNERA_API_URL: ${{ inputs.api-url }}
+        VULNERA_REPOSITORY_ID: ${{ inputs.repository-id }}
+        VULNERA_SCAN_ID: ${{ inputs.scan-id }}
+        VULNERA_COMMIT_SHA: ${{ inputs.commit-sha }}
+        VULNERA_REF: ${{ inputs.ref }}
+        VULNERA_SCANNERS: ${{ inputs.scanners }}
+        VULNERA_ALLOW_INGESTION: ${{ inputs.allow-ingestion }}
+        VULNERA_UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
+        ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+      run: node "$GITHUB_ACTION_PATH/action/runner.mjs"
