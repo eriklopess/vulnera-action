@@ -8,6 +8,11 @@ const exec = promisify(execFile);
 const out = join(process.env.RUNNER_TEMP || '/tmp', `vulnera-${process.env.VULNERA_SCAN_ID}`);
 const scanners = (process.env.VULNERA_SCANNERS || 'secrets,sca,sast,iac').split(',').map((x) => x.trim()).filter(Boolean);
 const allow = process.env.VULNERA_ALLOW_INGESTION === 'true';
+const apiBase = (() => {
+  const raw = String(process.env.VULNERA_API_URL ?? '').trim().replace(/\/+$/, '');
+  if (!raw) throw new Error('VULNERA_API_URL não configurada');
+  return /\/api$/i.test(raw) ? raw : `${raw}/api`;
+})();
 const command = async (bin, args, output, timeout) => { try { await exec(bin, args, { cwd: process.env.GITHUB_WORKSPACE, maxBuffer: 8 * 1024 * 1024, timeout }); } catch (error) { if (error.code !== 1) throw error; } return readFile(output, 'utf8').then(JSON.parse).catch(() => Array.isArray(output) ? output : []); };
 const records = (scanner, raw) => {
   if (scanner === 'SECRETS') return Array.isArray(raw) ? raw : [];
@@ -52,17 +57,17 @@ if (!process.env.ACTIONS_ID_TOKEN_REQUEST_URL || !process.env.ACTIONS_ID_TOKEN_R
 const oidc = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=vulnera`, { headers: { Authorization: `bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
 if (!oidc.ok) throw new Error(`Falha ao solicitar OIDC (${oidc.status})`);
 const { value } = await oidc.json();
-const exchange = await fetch(`${process.env.VULNERA_API_URL}/ingestion/oidc/exchange`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: value, repositoryId: process.env.VULNERA_REPOSITORY_ID }) });
+const exchange = await fetch(`${apiBase}/ingestion/oidc/exchange`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: value, repositoryId: process.env.VULNERA_REPOSITORY_ID }) });
 if (!exchange.ok) { const detail = await exchange.text().catch(() => ''); throw new Error(`Falha no exchange OIDC (${exchange.status}): ${detail.slice(0, 500)}`); }
 const { token } = await exchange.json();
 for (const item of results) {
   if (item.errorCode) {
-    const failure = await fetch(`${process.env.VULNERA_API_URL}/ingestion/scanner-failure`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ scanId: process.env.VULNERA_SCAN_ID, manifestVersion: '1', commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, scannerType: item.scannerType, scannerVersion: item.scannerVersion, errorCode: item.errorCode }) });
+    const failure = await fetch(`${apiBase}/ingestion/scanner-failure`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ scanId: process.env.VULNERA_SCAN_ID, manifestVersion: '1', commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, scannerType: item.scannerType, scannerVersion: item.scannerVersion, errorCode: item.errorCode }) });
     if (!failure.ok) throw new Error(`Falha ao registrar erro ${item.scannerType} (${failure.status})`);
     continue;
   }
   const body = { scanId: process.env.VULNERA_SCAN_ID, manifestVersion: '1', commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, scannerType: item.scannerType, scannerVersion: item.scannerVersion, findings: normalized(item.scannerType, item.scannerVersion, item.result), ...(item.scannerType === 'SCA' ? { dependencies: dependencies(item.result) } : {}) };
-  const response = await fetch(`${process.env.VULNERA_API_URL}/ingestion/results`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const response = await fetch(`${apiBase}/ingestion/results`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error(`Falha na ingestão ${item.scannerType} (${response.status})`);
   const accepted = await response.json();
   // Never persist Gitleaks output: raw reports may contain credential material.
@@ -72,6 +77,6 @@ for (const item of results) {
   // Keep the complete JSON request below Fastify's 1 MiB body limit.
   // Base64 expands the report and the envelope adds additional bytes.
   if (Buffer.byteLength(content, 'utf8') > 700_000) { console.warn(`Vulnera: artefato ${item.scannerType} excede o limite e foi omitido.`); continue; }
-  const artifact = await fetch(`${process.env.VULNERA_API_URL}/ingestion/artifacts`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ scanId: process.env.VULNERA_SCAN_ID, scannerExecutionId: accepted.scannerExecutionId, scannerType: item.scannerType, contentType: 'application/json', contentBase64: content }) });
+  const artifact = await fetch(`${apiBase}/ingestion/artifacts`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ scanId: process.env.VULNERA_SCAN_ID, scannerExecutionId: accepted.scannerExecutionId, scannerType: item.scannerType, contentType: 'application/json', contentBase64: content }) });
   if (!artifact.ok) throw new Error(`Falha no upload do artefato ${item.scannerType} (${artifact.status})`);
 }
