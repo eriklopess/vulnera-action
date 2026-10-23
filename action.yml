@@ -7,12 +7,19 @@ inputs:
   commit-sha: { description: Immutable commit SHA, required: true }
   ref: { description: Git ref, required: true }
   scanners: { description: Comma separated scanner names, required: false, default: secrets,sca,sast,iac }
+  phase: { description: Scanner phase (scan, upload, or all), required: false, default: all }
   allow-ingestion: { description: Allow privileged result upload, required: false, default: 'false' }
+  results-path: { description: Path to the downloaded scan result manifest for upload phase, required: false, default: '' }
   upload-artifacts: { description: Upload non-secret scanner reports to private artifact storage, required: false, default: 'true' }
+outputs:
+  results-path:
+    description: Path to the result manifest produced by the scan phase
+    value: ${{ steps.runner.outputs.results-path }}
 runs:
   using: composite
   steps:
     - name: Install pinned scanner toolchain
+      if: inputs.phase != 'upload'
       shell: bash
       run: |
         set -euo pipefail
@@ -32,7 +39,8 @@ runs:
           echo "${install_dir}" >> "${GITHUB_PATH}"
         fi
         python3 -m pip install --disable-pip-version-check --quiet "semgrep==1.91.0" "checkov==3.2.293"
-    - shell: bash
+    - id: runner
+      shell: bash
       env:
         VULNERA_API_URL: ${{ inputs.api-url }}
         VULNERA_REPOSITORY_ID: ${{ inputs.repository-id }}
@@ -40,6 +48,8 @@ runs:
         VULNERA_COMMIT_SHA: ${{ inputs.commit-sha }}
         VULNERA_REF: ${{ inputs.ref }}
         VULNERA_SCANNERS: ${{ inputs.scanners }}
+        VULNERA_PHASE: ${{ inputs.phase }}
         VULNERA_ALLOW_INGESTION: ${{ inputs.allow-ingestion }}
+        VULNERA_RESULTS_PATH: ${{ inputs.results-path }}
         VULNERA_UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
       run: node "$GITHUB_ACTION_PATH/action/runner.mjs"
