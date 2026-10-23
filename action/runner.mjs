@@ -57,7 +57,7 @@ if (!process.env.ACTIONS_ID_TOKEN_REQUEST_URL || !process.env.ACTIONS_ID_TOKEN_R
 const oidc = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=vulnera`, { headers: { Authorization: `bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
 if (!oidc.ok) throw new Error(`Falha ao solicitar OIDC (${oidc.status})`);
 const { value } = await oidc.json();
-const exchange = await fetch(`${apiBase}/ingestion/oidc/exchange`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: value, repositoryId: process.env.VULNERA_REPOSITORY_ID }) });
+const exchange = await fetch(`${apiBase}/ingestion/oidc/exchange`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: value, repositoryId: process.env.VULNERA_REPOSITORY_ID, scanId: process.env.VULNERA_SCAN_ID, commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF }) });
 if (!exchange.ok) { const detail = await exchange.text().catch(() => ''); throw new Error(`Falha no exchange OIDC (${exchange.status}): ${detail.slice(0, 500)}`); }
 const { token } = await exchange.json();
 for (const item of results) {
