@@ -42,6 +42,4 @@ runs:
         VULNERA_SCANNERS: ${{ inputs.scanners }}
         VULNERA_ALLOW_INGESTION: ${{ inputs.allow-ingestion }}
         VULNERA_UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
-        ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
       run: node "$GITHUB_ACTION_PATH/action/runner.mjs"
