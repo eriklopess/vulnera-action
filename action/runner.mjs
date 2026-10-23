@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, rm, mkdir } from 'node:fs/promises';
+import { appendFile, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 const exec = promisify(execFile);
 const out = join(process.env.RUNNER_TEMP || '/tmp', `vulnera-${process.env.VULNERA_SCAN_ID}`);
+const phase = process.env.VULNERA_PHASE || 'all';
 const scanners = (process.env.VULNERA_SCANNERS || 'secrets,sca,sast,iac').split(',').map((x) => x.trim()).filter(Boolean);
 const allow = process.env.VULNERA_ALLOW_INGESTION === 'true';
 const apiBase = (() => {
@@ -45,13 +46,41 @@ const normalized = (scanner, toolVersion, raw) => records(scanner, raw).slice(0,
   return { scannerType: scanner, tool: scanner === 'SECRETS' ? 'gitleaks' : scanner === 'SCA' ? 'osv-scanner' : scanner === 'SAST' ? 'semgrep' : 'checkov', toolVersion, ruleId, title, description: title, severity: ['CRITICAL','HIGH','MEDIUM','LOW','INFO'].includes(severity) ? severity : 'UNKNOWN', confidence: 'UNKNOWN', fingerprint, filePath, startLine: Number.isInteger(startLine) && startLine > 0 ? startLine : undefined, endLine: Number.isInteger(startLine) && startLine > 0 ? startLine : undefined, cweIds: [], cveIds: item.id ? [String(item.id)] : [], metadata: { scanner, packageName: packageInfo.name, currentVersion: packageInfo.version, ecosystem: packageInfo.ecosystem, manifestPath, fixedVersions, dependency: { packageName: packageInfo.name, currentVersion: packageInfo.version, fixedVersion: fixedVersions[0], manifestPath, packageManager: manifestPath?.includes('pnpm') ? 'pnpm' : 'npm' } } };
 });
 
-await rm(out, { recursive: true, force: true }); await mkdir(out, { recursive: true });
-const results = [];
+let results = [];
 const runScanner = async (scannerType, scannerVersion, bin, args, output, timeout) => { try { return { scannerType, scannerVersion, result: await command(bin, args, output, timeout) }; } catch (error) { return { scannerType, scannerVersion, errorCode: String(error.code ?? 'SCANNER_EXECUTION_FAILED').slice(0, 500) }; } };
-if (scanners.includes('secrets')) results.push(await runScanner('SECRETS', '8.24.2', 'gitleaks', ['detect', '--source', '.', '--report-format', 'json', '--report-path', join(out, 'gitleaks.json'), '--no-banner'], join(out, 'gitleaks.json'), 300_000));
-if (scanners.includes('sca')) results.push(await runScanner('SCA', '2.0.2', 'osv-scanner', ['scan', 'source', '--format', 'json', '--output', join(out, 'osv.json'), '--recursive', '.'], join(out, 'osv.json'), 300_000));
-if (scanners.includes('sast')) results.push(await runScanner('SAST', '1.91.0', 'semgrep', ['scan', '--config', 'p/security-audit', '--json', '--output', join(out, 'semgrep.json'), '.'], join(out, 'semgrep.json'), 600_000));
-if (scanners.includes('iac')) results.push(await runScanner('IAC', '3.2.293', 'checkov', ['--directory', '.', '--output', 'json', '--output-file', join(out, 'checkov.json'), '--quiet'], join(out, 'checkov.json'), 300_000));
+if (phase === 'upload') {
+  const resultsPath = process.env.VULNERA_RESULTS_PATH;
+  if (!resultsPath) throw new Error('VULNERA_RESULTS_PATH não configurado para o upload');
+  const manifest = JSON.parse(await readFile(resultsPath, 'utf8'));
+  if (manifest.version !== 1 || manifest.scanId !== process.env.VULNERA_SCAN_ID || manifest.commitSha !== process.env.VULNERA_COMMIT_SHA || manifest.ref !== process.env.VULNERA_REF || !Array.isArray(manifest.results)) throw new Error('Manifesto de resultados inválido ou de outro scan');
+  results = manifest.results.map((item) => ({ scannerType: item.scannerType, scannerVersion: item.scannerVersion, errorCode: item.errorCode, findings: item.findings, dependencies: item.dependencies, artifact: item.artifact }));
+} else {
+  await rm(out, { recursive: true, force: true }); await mkdir(out, { recursive: true });
+  if (scanners.includes('secrets')) results.push(await runScanner('SECRETS', '8.24.2', 'gitleaks', ['detect', '--source', '.', '--report-format', 'json', '--report-path', join(out, 'gitleaks.json'), '--no-banner'], join(out, 'gitleaks.json'), 300_000));
+  if (scanners.includes('sca')) results.push(await runScanner('SCA', '2.0.2', 'osv-scanner', ['scan', 'source', '--format', 'json', '--output', join(out, 'osv.json'), '--recursive', '.'], join(out, 'osv.json'), 300_000));
+  if (scanners.includes('sast')) results.push(await runScanner('SAST', '1.91.0', 'semgrep', ['scan', '--config', 'p/security-audit', '--json', '--output', join(out, 'semgrep.json'), '.'], join(out, 'semgrep.json'), 600_000));
+  if (scanners.includes('iac')) results.push(await runScanner('IAC', '3.2.293', 'checkov', ['--directory', '.', '--output', 'json', '--output-file', join(out, 'checkov.json'), '--quiet'], join(out, 'checkov.json'), 300_000));
+}
+if (phase === 'scan') {
+  const resultManifest = { version: 1, scanId: process.env.VULNERA_SCAN_ID, commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, results: results.map((item) => {
+    const findings = item.errorCode ? [] : normalized(item.scannerType, item.scannerVersion, item.result);
+    const deps = item.scannerType === 'SCA' && !item.errorCode ? dependencies(item.result) : undefined;
+    let artifact;
+    if (item.scannerType !== 'SECRETS' && process.env.VULNERA_UPLOAD_ARTIFACTS === 'true' && !item.errorCode) {
+      const serialized = JSON.stringify(sanitize(item.result));
+      if (Buffer.byteLength(Buffer.from(serialized).toString('base64'), 'utf8') <= 700_000) artifact = JSON.parse(serialized);
+      else console.warn(`Vulnera: artefato ${item.scannerType} excede o limite e foi omitido.`);
+    }
+    return { scannerType: item.scannerType, scannerVersion: item.scannerVersion, ...(item.errorCode ? { errorCode: item.errorCode } : {}), findings, ...(deps ? { dependencies: deps } : {}), ...(artifact === undefined ? {} : { artifact }) };
+  }) };
+  const resultsPath = join(out, 'results.json');
+  await writeFile(resultsPath, JSON.stringify(resultManifest));
+  if (!process.env.GITHUB_OUTPUT) throw new Error('GITHUB_OUTPUT não disponível para exportar o manifesto');
+  await appendFile(process.env.GITHUB_OUTPUT, `results-path=${resultsPath}\n`);
+  console.log('Vulnera: resultados preparados para transferência entre jobs.');
+  process.exit(0);
+}
+if (!['all', 'upload'].includes(phase)) throw new Error(`Fase Vulnera inválida: ${phase}`);
 if (!allow) { console.log('Vulnera: resultados produzidos sem ingestão privilegiada (contexto não confiável).'); process.exit(0); }
 if (!process.env.ACTIONS_ID_TOKEN_REQUEST_URL || !process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error('OIDC do GitHub não disponível; confira permissions.id-token: write');
 const oidc = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=vulnera`, { headers: { Authorization: `bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
@@ -66,13 +95,13 @@ for (const item of results) {
     if (!failure.ok) throw new Error(`Falha ao registrar erro ${item.scannerType} (${failure.status})`);
     continue;
   }
-  const body = { scanId: process.env.VULNERA_SCAN_ID, manifestVersion: '1', commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, scannerType: item.scannerType, scannerVersion: item.scannerVersion, findings: normalized(item.scannerType, item.scannerVersion, item.result), ...(item.scannerType === 'SCA' ? { dependencies: dependencies(item.result) } : {}) };
+  const body = { scanId: process.env.VULNERA_SCAN_ID, manifestVersion: '1', commitSha: process.env.VULNERA_COMMIT_SHA, ref: process.env.VULNERA_REF, scannerType: item.scannerType, scannerVersion: item.scannerVersion, findings: item.findings ?? normalized(item.scannerType, item.scannerVersion, item.result), ...(item.scannerType === 'SCA' ? { dependencies: item.dependencies ?? dependencies(item.result) } : {}) };
   const response = await fetch(`${apiBase}/ingestion/results`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error(`Falha na ingestão ${item.scannerType} (${response.status})`);
   const accepted = await response.json();
   // Never persist Gitleaks output: raw reports may contain credential material.
   if (item.scannerType === 'SECRETS' || process.env.VULNERA_UPLOAD_ARTIFACTS !== 'true' || accepted.scannerExecutionId === undefined) continue;
-  const raw = JSON.stringify(sanitize(item.result));
+  const raw = JSON.stringify(item.artifact ?? sanitize(item.result));
   const content = Buffer.from(raw).toString('base64');
   // Keep the complete JSON request below Fastify's 1 MiB body limit.
   // Base64 expands the report and the envelope adds additional bytes.
