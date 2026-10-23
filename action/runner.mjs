@@ -49,7 +49,7 @@ await rm(out, { recursive: true, force: true }); await mkdir(out, { recursive: t
 const results = [];
 const runScanner = async (scannerType, scannerVersion, bin, args, output, timeout) => { try { return { scannerType, scannerVersion, result: await command(bin, args, output, timeout) }; } catch (error) { return { scannerType, scannerVersion, errorCode: String(error.code ?? 'SCANNER_EXECUTION_FAILED').slice(0, 500) }; } };
 if (scanners.includes('secrets')) results.push(await runScanner('SECRETS', '8.24.2', 'gitleaks', ['detect', '--source', '.', '--report-format', 'json', '--report-path', join(out, 'gitleaks.json'), '--no-banner'], join(out, 'gitleaks.json'), 300_000));
-if (scanners.includes('sca')) results.push(await runScanner('SCA', '2.0.2', 'osv-scanner', ['--format', 'json', '--output', join(out, 'osv.json'), '--recursive', '.'], join(out, 'osv.json'), 300_000));
+if (scanners.includes('sca')) results.push(await runScanner('SCA', '2.0.2', 'osv-scanner', ['scan', 'source', '--format', 'json', '--output-file', join(out, 'osv.json'), '--recursive', '.'], join(out, 'osv.json'), 300_000));
 if (scanners.includes('sast')) results.push(await runScanner('SAST', '1.91.0', 'semgrep', ['scan', '--config', 'p/security-audit', '--json', '--output', join(out, 'semgrep.json'), '.'], join(out, 'semgrep.json'), 600_000));
 if (scanners.includes('iac')) results.push(await runScanner('IAC', '3.2.293', 'checkov', ['--directory', '.', '--output', 'json', '--output-file', join(out, 'checkov.json'), '--quiet'], join(out, 'checkov.json'), 300_000));
 if (!allow) { console.log('Vulnera: resultados produzidos sem ingestão privilegiada (contexto não confiável).'); process.exit(0); }
